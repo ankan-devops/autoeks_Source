@@ -1,0 +1,62 @@
+on:
+  push:
+    branches:
+      - master
+
+name: Deploy to Amazon EKS
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    env:
+      awsregion:
+      CLUSTER_N:
+      ha: ${{ github.sha }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v1
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.awsregion }}
+        
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }} 
+      run: |
+        docker build -t $ECR_REGISTRY/${{ env.CLUSTER_N }}:${{ env.ha }} .
+        docker push $ECR_REGISTRY/${{ env.CLUSTER_N }}:${{ env.ha }}
+        echo "::set-output name=image::$ECR_REGISTRY/${{ env.CLUSTER_N }}:${{ env.ha }}"
+        
+    - name: Render Deployment YAML
+      uses: nowactions/envsubst@v1
+      with:
+        input: ./deployment.yaml
+        output: ./deployment1.yaml
+      env:
+        BITBUCKET_BUILD_NUMBER: ${{ env.ha }}
+          
+    - name: Deploy to EKS
+      id: deploy
+      run: |
+        sudo aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+        sudo aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        sudo aws configure set default.region ${{ env.awsregion }}
+        sudo aws configure set default.output json
+        sudo curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.21.2/2021-07-05/bin/linux/amd64/kubectl
+        sudo chmod +x ./kubectl
+        sudo mv ./kubectl /usr/bin/kubectl
+        sudo aws eks --region ${{ env.awsregion }} update-kubeconfig --name ${{ env.CLUSTER_N }}
+        sudo kubectl apply -f deployment1.yaml
+        sudo kubectl apply -f service.yaml
+        sleep 15
+        sudo kubectl get services
